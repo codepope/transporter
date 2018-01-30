@@ -30,6 +30,7 @@ type Writer struct {
 	confirmChan chan struct{}
 	logger      log.Logger
 	writeErr    error
+	parentID    string
 }
 
 func init() {
@@ -51,8 +52,9 @@ func init() {
 			return nil, err
 		}
 		w := &Writer{
-			index:  opts.Index,
-			logger: log.With("writer", "elasticsearch").With("version", 5),
+			index:    opts.Index,
+			parentID: opts.ParentID,
+			logger:   log.With("writer", "elasticsearch").With("version", 5),
 		}
 		p, err := esClient.BulkProcessor().
 			Name("TransporterWorker-1").
@@ -85,6 +87,11 @@ func (w *Writer) Write(msg message.Msg) func(client.Session) (message.Msg, error
 			id = msg.ID()
 			msg.Data().Delete("_id")
 		}
+		var pID string
+		if _, ok := msg.Data()[w.parentID]; ok {
+			pID = msg.Data()[w.parentID].(string)
+			msg.Data().Delete(w.parentID)
+		}
 
 		var br elastic.BulkableRequest
 		switch msg.OP() {
@@ -92,12 +99,29 @@ func (w *Writer) Write(msg message.Msg) func(client.Session) (message.Msg, error
 			// we need to flush any pending writes here or this could fail because we're using
 			// more than 1 worker
 			w.bp.Flush()
-			br = elastic.NewBulkDeleteRequest().Index(w.index).Type(indexType).Id(id)
+			indexReq := elastic.NewBulkDeleteRequest().Index(w.index).Type(indexType).Id(id)
+			if pID != "" {
+				indexReq.Routing(pID)
+			}
+			br = indexReq
 		case ops.Insert:
-			br = elastic.NewBulkIndexRequest().Index(w.index).Type(indexType).Id(id).Doc(msg.Data())
+			indexReq := elastic.NewBulkIndexRequest().Index(w.index).Type(indexType).Id(id)
+			if pID != "" {
+				indexReq.Parent(pID)
+				indexReq.Routing(pID)
+			}
+			indexReq.Doc(msg.Data())
+			br = indexReq
 		case ops.Update:
-			br = elastic.NewBulkUpdateRequest().Index(w.index).Type(indexType).Id(id).Doc(msg.Data())
+			indexReq := elastic.NewBulkUpdateRequest().Index(w.index).Type(indexType).Id(id)
+			if pID != "" {
+				indexReq.Parent(pID)
+				indexReq.Routing(pID)
+			}
+			indexReq.Doc(msg.Data())
+			br = indexReq
 		}
+
 		w.bp.Add(br)
 		return msg, nil
 	}
@@ -122,6 +146,18 @@ func (w *Writer) postBulkProcessor(executionID int64, reqs []elastic.BulkableReq
 			With("succeeeded", len(resp.Succeeded())).
 			With("failed", len(resp.Failed())).
 			Debugln("_bulk flush completed")
+
+		if len(resp.Failed()) > 0 {
+			for i, f := range resp.Failed() {
+				w.logger.With("executionID", executionID).
+					With("index", f.Index).
+					With("type", f.Type).
+					With("id", f.Id).
+					With("error", fmt.Sprintf("%#v", f.Error)).
+					Errorln(fmt.Sprintf("_bulk failed list [%d]", i))
+			}
+		}
+
 		if w.confirmChan != nil && len(resp.Failed()) == 0 {
 			w.confirmChan <- struct{}{}
 		}

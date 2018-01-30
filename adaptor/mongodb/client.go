@@ -3,12 +3,13 @@ package mongodb
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/compose/transporter/client"
 	"github.com/compose/transporter/log"
@@ -154,14 +155,16 @@ func WithCACerts(certs []string) ClientOptionFunc {
 		if len(certs) > 0 {
 			roots := x509.NewCertPool()
 			for _, cert := range certs {
-				if _, err := os.Stat(cert); err == nil {
-					c, err := ioutil.ReadFile(cert)
-					if err != nil {
-						return err
-					}
-					cert = string(c)
+				if _, err := os.Stat(cert); err != nil {
+					return errors.New("Cert file not found")
 				}
-				if ok := roots.AppendCertsFromPEM([]byte(cert)); !ok {
+
+				c, err := ioutil.ReadFile(cert)
+				if err != nil {
+					return err
+				}
+
+				if ok := roots.AppendCertsFromPEM(c); !ok {
 					return client.ErrInvalidCert
 				}
 			}
@@ -204,13 +207,14 @@ func WithTail(tail bool) ClientOptionFunc {
 	}
 }
 
-func WithReadPreference(read_preference string) ClientOptionFunc {
+// WithReadPreference sets the MongoDB read preference based on the provided string.
+func WithReadPreference(readPreference string) ClientOptionFunc {
 	return func(c *Client) error {
-		if read_preference == "" {
+		if readPreference == "" {
 			c.readPreference = DefaultReadPreference
 			return nil
 		}
-		switch strings.ToLower(read_preference) {
+		switch strings.ToLower(readPreference) {
 		case "primary":
 			c.readPreference = mgo.Primary
 		case "primarypreferred":
@@ -222,7 +226,7 @@ func WithReadPreference(read_preference string) ClientOptionFunc {
 		case "nearest":
 			c.readPreference = mgo.Nearest
 		default:
-			return InvalidReadPreferenceError{ReadPreference: read_preference}
+			return InvalidReadPreferenceError{ReadPreference: readPreference}
 		}
 		return nil
 	}
